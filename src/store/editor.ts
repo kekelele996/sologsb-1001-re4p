@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import type { Cue, EditorDocument, Locale, Snapshot } from '../types'
+import type { Cue, DeliveryBatch, DeliveryBatchItem, DeliveryDiffEntry, EditorDocument, Locale, Snapshot } from '../types'
 import { loadDocument, saveDocument } from '../utils/db'
 import { makeId } from '../utils/id'
 import { parseScript, parseSrt, toSrt } from '../utils/subtitle'
@@ -11,6 +11,37 @@ let channel: BroadcastChannel | undefined
 
 const cloneCues = (cues: Cue[]): Cue[] => JSON.parse(JSON.stringify(cues)) as Cue[]
 const plainDocument = (document: EditorDocument): EditorDocument => JSON.parse(JSON.stringify(document)) as EditorDocument
+
+const freezeItem = (cue: Cue): DeliveryBatchItem => ({
+  cueId: cue.id,
+  start: cue.start,
+  end: cue.end,
+  target: cue.target,
+  speed: cue.speed,
+  termIds: [...cue.termIds],
+})
+const sameTerms = (a: string[], b: string[]) => {
+  if (a.length !== b.length) return false
+  const sortedB = [...b].sort()
+  return [...a].sort().every((id, index) => id === sortedB[index])
+}
+const sameItem = (a: DeliveryBatchItem, b: DeliveryBatchItem) =>
+  a.start === b.start && a.end === b.end && a.target === b.target && a.speed === b.speed && sameTerms(a.termIds, b.termIds)
+const diffItems = (before: DeliveryBatchItem[], after: DeliveryBatchItem[]): DeliveryDiffEntry[] => {
+  const entries: DeliveryDiffEntry[] = []
+  const beforeMap = new Map(before.map((item) => [item.cueId, item]))
+  const afterMap = new Map(after.map((item) => [item.cueId, item]))
+  for (const item of after) {
+    const previous = beforeMap.get(item.cueId)
+    if (!previous) entries.push({ cueId: item.cueId, type: 'added', after: item })
+    else if (!sameItem(previous, item)) entries.push({ cueId: item.cueId, type: 'changed', before: previous, after: item })
+  }
+  for (const item of before) {
+    if (!afterMap.has(item.cueId)) entries.push({ cueId: item.cueId, type: 'removed', before: item })
+  }
+  const startOf = (entry: DeliveryDiffEntry) => (entry.after ?? entry.before)?.start ?? 0
+  return entries.sort((a, b) => startOf(a) - startOf(b))
+}
 
 const createDefaultDocument = (): EditorDocument => ({
   id: DOCUMENT_ID,
@@ -40,6 +71,7 @@ const createDefaultDocument = (): EditorDocument => ({
     { id: 'cue-demo-06', start: 25.4, end: 31.2, source: '所以我们决定把安装说明拆开，并为每个平台补上验证步骤。', target: '因此，我们拆分安装说明，并为每个平台补上验证步骤。', actorId: 'actor-chen', speed: 1.05, termIds: [], status: 'draft', locked: false },
   ],
   snapshots: [],
+  deliveryBatches: [],
 })
 
 type SaveState = 'saved' | 'dirty' | 'saving' | 'conflict'
@@ -74,6 +106,31 @@ export const useEditorStore = defineStore('subtitle-editor', {
     totalDuration(state): number {
       return Math.max(10, ...state.document.cues.map((cue) => cue.end)) * 1.04
     },
+    batchesFor: (state) => (actorId: string): DeliveryBatch[] =>
+      state.document.deliveryBatches
+        .filter((batch) => batch.actorId === actorId)
+        .sort((a, b) => a.createdAt - b.createdAt),
+    deliveryDiff: (state) => (batch: DeliveryBatch): DeliveryDiffEntry[] => {
+      const batches = state.document.deliveryBatches
+        .filter((item) => item.actorId === batch.actorId)
+        .sort((a, b) => a.createdAt - b.createdAt)
+      const index = batches.findIndex((item) => item.id === batch.id)
+      const previous = index > 0 ? batches[index - 1] : undefined
+      return diffItems(previous?.items ?? [], batch.items)
+    },
+    batchDrift: (state) => (batch: DeliveryBatch): DeliveryDiffEntry[] => {
+      const entries: DeliveryDiffEntry[] = []
+      for (const item of batch.items) {
+        const cue = state.document.cues.find((candidate) => candidate.id === item.cueId)
+        if (!cue || cue.actorId !== batch.actorId) {
+          entries.push({ cueId: item.cueId, type: 'removed', before: item })
+          continue
+        }
+        const current = freezeItem(cue)
+        if (!sameItem(item, current)) entries.push({ cueId: item.cueId, type: 'changed', before: item, after: current })
+      }
+      return entries
+    },
   },
   actions: {
     async initialize() {
@@ -81,6 +138,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.online = navigator.onLine
       const stored = await loadDocument(DOCUMENT_ID)
       if (stored) {
+        stored.deliveryBatches ??= []
         this.document = stored
         this.lastSeenRevision = stored.revision
       } else {
@@ -189,6 +247,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
     async loadLatest() {
       const latest = await loadDocument(DOCUMENT_ID)
       if (!latest) return
+      latest.deliveryBatches ??= []
       this.document = latest
       this.lastSeenRevision = latest.revision
       this.conflict = false
@@ -283,6 +342,23 @@ export const useEditorStore = defineStore('subtitle-editor', {
         const index = cues.findIndex((item) => item.id === id)
         if (index >= 0) cues.splice(index, 1)
       }, this.document.cues[Math.max(0, this.document.cues.findIndex((item) => item.id === id) - 1)]?.id ?? null)
+    },
+    createDeliveryBatch(actorId: string) {
+      const cues = this.document.cues
+        .filter((cue) => cue.actorId === actorId && cue.status === 'reviewed')
+        .sort((a, b) => a.start - b.start)
+      if (!cues.length) return null
+      const items = cues.map(freezeItem)
+      const batch: DeliveryBatch = {
+        id: makeId('batch'),
+        actorId,
+        createdAt: Date.now(),
+        items,
+        totalDuration: Number(items.reduce((sum, item) => sum + (item.end - item.start), 0).toFixed(2)),
+      }
+      this.document.deliveryBatches.push(batch)
+      this.markChanged('delivery-batch')
+      return batch
     },
     createSnapshot(name: string) {
       const snapshot: Snapshot = { id: makeId('snapshot'), name: name.trim() || `v${this.document.snapshots.length + 1}`, createdAt: Date.now(), cues: cloneCues(this.document.cues) }

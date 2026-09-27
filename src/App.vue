@@ -3,11 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Clock, Delete, DocumentCopy, Download, EditPen, Files, Lock, MagicStick, Monitor,
+  Clock, Collection, Delete, DocumentCopy, Download, EditPen, Files, Lock, MagicStick, Monitor,
   RefreshLeft, RefreshRight, Search, Unlock, UploadFilled,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from './store/editor'
-import type { Cue, CueConflict } from './types'
+import type { Cue, CueConflict, DeliveryDiffEntry } from './types'
+import type { MessageKey } from './i18n'
 import { formatTime } from './utils/subtitle'
 
 const store = useEditorStore()
@@ -16,6 +17,8 @@ const fileInput = ref<HTMLInputElement>()
 const snapshotDialog = ref(false)
 const snapshotName = ref('')
 const search = ref('')
+const deliveryDialog = ref(false)
+const deliveryActorId = ref('')
 
 const filteredCues = computed(() => {
   const query = search.value.trim().toLowerCase()
@@ -32,6 +35,42 @@ const actorColor = (id: string) => project.value.actors.find((actor) => actor.id
 const actorName = (id: string) => project.value.actors.find((actor) => actor.id === id)?.name ?? '—'
 const statusLabel = (status: Cue['status']) => store.t(status)
 const statusType = (status: Cue['status']) => status === 'reviewed' ? 'success' : status === 'issue' ? 'danger' : 'info'
+
+const deliverableCues = computed(() =>
+  project.value.cues.filter((cue) => cue.actorId === deliveryActorId.value && cue.status === 'reviewed'),
+)
+const deliverableDuration = computed(() =>
+  deliverableCues.value.reduce((sum, cue) => sum + (cue.end - cue.start), 0),
+)
+const actorBatches = computed(() => (deliveryActorId.value ? store.batchesFor(deliveryActorId.value) : []))
+const deliveryBatchesDesc = computed(() =>
+  actorBatches.value.map((batch, index) => ({ batch, number: index + 1 })).reverse(),
+)
+const formatDuration = (seconds: number) => `${seconds.toFixed(1)}s`
+const diffLabelKey = (type: DeliveryDiffEntry['type']): MessageKey =>
+  type === 'added' ? 'diffAdded' : type === 'changed' ? 'diffChanged' : 'diffRemoved'
+const diffTagType = (type: DeliveryDiffEntry['type']) =>
+  type === 'added' ? 'success' : type === 'changed' ? 'warning' : 'danger'
+function diffDetail(entry: DeliveryDiffEntry) {
+  if (entry.type !== 'changed' || !entry.before || !entry.after) return ''
+  const parts: string[] = []
+  if (entry.before.start !== entry.after.start || entry.before.end !== entry.after.end) parts.push(store.t('timecode'))
+  if (entry.before.target !== entry.after.target) parts.push(store.t('targetField'))
+  if (entry.before.speed !== entry.after.speed) parts.push(`${store.t('speed')} ${entry.before.speed} → ${entry.after.speed}`)
+  const beforeTerms = [...entry.before.termIds].sort().join()
+  const afterTerms = [...entry.after.termIds].sort().join()
+  if (beforeTerms !== afterTerms) parts.push(store.t('termsUsed'))
+  return parts.join(' · ')
+}
+function openDelivery() {
+  deliveryActorId.value = actorFilter.value !== 'all' ? actorFilter.value : project.value.actors[0]?.id ?? ''
+  deliveryDialog.value = true
+}
+function createDelivery() {
+  const batch = store.createDeliveryBatch(deliveryActorId.value)
+  if (batch) ElMessage.success(store.t('deliveryDone', { count: batch.items.length, duration: formatDuration(batch.totalDuration) }))
+  else ElMessage.warning(store.t('deliveryNone'))
+}
 
 function updateSelected(patch: Partial<Cue>, label = 'update-cue') {
   if (selectedCue.value) store.updateCue(selectedCue.value.id, patch, label)
@@ -146,6 +185,7 @@ const handleOffline = () => setOnline(false)
         <input ref="fileInput" class="file-input" type="file" accept=".srt,.txt,text/plain" @change="importFile" />
         <el-button :icon="UploadFilled" @click="fileInput?.click()">{{ store.t('import') }}</el-button>
         <el-button :icon="Download" @click="store.exportSrt">{{ store.t('export') }}</el-button>
+        <el-button :icon="Collection" @click="openDelivery">{{ store.t('delivery') }}</el-button>
         <el-button type="primary" :icon="DocumentCopy" @click="snapshotDialog = true">{{ store.t('snapshot') }}</el-button>
       </div>
     </header>
@@ -316,6 +356,60 @@ const handleOffline = () => setOnline(false)
       <span><kbd>L</kbd> {{ store.t('shortcutLock') }}</span>
       <span><kbd>Ctrl/⌘ Z</kbd> {{ store.t('shortcutUndo') }}</span>
     </footer>
+
+    <el-dialog v-model="deliveryDialog" :title="store.t('delivery')" width="680px">
+      <div class="delivery-toolbar">
+        <el-select v-model="deliveryActorId" class="delivery-actor-select">
+          <el-option v-for="actor in project.actors" :key="actor.id" :label="actor.name" :value="actor.id" />
+        </el-select>
+        <span class="delivery-ready" :class="{ empty: !deliverableCues.length }">
+          {{ deliverableCues.length ? store.t('deliveryReady', { count: deliverableCues.length, duration: formatDuration(deliverableDuration) }) : store.t('deliveryNone') }}
+        </span>
+        <el-button type="primary" :disabled="!deliverableCues.length" @click="createDelivery">{{ store.t('deliveryCreate') }}</el-button>
+      </div>
+      <p class="delivery-hint">{{ store.t('deliveryHint') }}</p>
+      <div class="batch-list">
+        <div v-for="{ batch, number } in deliveryBatchesDesc" :key="batch.id" class="batch-card">
+          <div class="batch-head">
+            <span class="actor-dot" :style="{ background: actorColor(batch.actorId) }" />
+            <b>{{ store.t('batchLabel', { index: number }) }}</b>
+            <small>{{ new Date(batch.createdAt).toLocaleString() }}</small>
+            <span>{{ store.t('batchMeta', { count: batch.items.length, duration: formatDuration(batch.totalDuration) }) }}</span>
+            <el-tag v-if="store.batchDrift(batch).length" size="small" type="warning">{{ store.t('driftTitle') }}</el-tag>
+          </div>
+          <div class="batch-diff">
+            <small>{{ number === 1 ? store.t('firstBatch') : store.t('diffVsPrevious') }}</small>
+            <p v-if="!store.deliveryDiff(batch).length" class="diff-empty">{{ store.t('diffNone') }}</p>
+            <div v-for="entry in store.deliveryDiff(batch)" :key="entry.cueId" class="diff-line" :class="entry.type">
+              <el-tag size="small" :type="diffTagType(entry.type)" effect="light">{{ store.t(diffLabelKey(entry.type)) }}</el-tag>
+              <code>{{ formatTime((entry.after ?? entry.before)?.start ?? 0) }}</code>
+              <span class="diff-text">
+                <template v-if="entry.type === 'changed' && entry.before?.target !== entry.after?.target">
+                  <del>{{ entry.before?.target }}</del>{{ entry.after?.target }}
+                </template>
+                <template v-else>{{ (entry.after ?? entry.before)?.target }}</template>
+              </span>
+              <small v-if="diffDetail(entry)" class="diff-detail">{{ diffDetail(entry) }}</small>
+            </div>
+          </div>
+          <div v-if="store.batchDrift(batch).length" class="batch-drift">
+            <small>{{ store.t('driftTitle') }} · {{ store.t('driftCount', { count: store.batchDrift(batch).length }) }}</small>
+            <div v-for="entry in store.batchDrift(batch)" :key="entry.cueId" class="diff-line" :class="entry.type">
+              <el-tag size="small" :type="diffTagType(entry.type)" effect="light">{{ store.t(diffLabelKey(entry.type)) }}</el-tag>
+              <code>{{ formatTime(entry.before?.start ?? 0) }}</code>
+              <span class="diff-text">
+                <template v-if="entry.type === 'changed' && entry.before?.target !== entry.after?.target">
+                  <del>{{ entry.before?.target }}</del>{{ entry.after?.target }}
+                </template>
+                <template v-else>{{ entry.before?.target }}</template>
+              </span>
+              <small v-if="diffDetail(entry)" class="diff-detail">{{ diffDetail(entry) }}</small>
+            </div>
+          </div>
+        </div>
+        <p v-if="!actorBatches.length" class="empty-state">{{ store.t('deliveryEmpty') }}</p>
+      </div>
+    </el-dialog>
 
     <el-dialog v-model="snapshotDialog" :title="store.t('snapshot')" width="460px">
       <el-input v-model="snapshotName" :placeholder="store.t('newSnapshotName')" @keyup.enter="createSnapshot" />

@@ -35,6 +35,30 @@ export interface Snapshot {
   cues: Cue[]
 }
 
+export interface DeliveryBatchItem {
+  cueId: string
+  start: number
+  end: number
+  target: string
+  speed: number
+  termIds: string[]
+}
+
+export interface DeliveryBatch {
+  id: string
+  actorId: string
+  createdAt: number
+  items: DeliveryBatchItem[]
+  totalDuration: number
+}
+
+export interface DeliveryDiffEntry {
+  cueId: string
+  type: 'added' | 'changed' | 'removed'
+  before?: DeliveryBatchItem
+  after?: DeliveryBatchItem
+}
+
 export interface EditorDocument {
   id: string
   title: string
@@ -43,6 +67,7 @@ export interface EditorDocument {
   actors: Actor[]
   terms: Term[]
   snapshots: Snapshot[]
+  deliveryBatches: DeliveryBatch[]
   updatedAt: number
   revision: number
   lastWriter: string
