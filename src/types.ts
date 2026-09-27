@@ -35,6 +35,42 @@ export interface Snapshot {
   cues: Cue[]
 }
 
+export type BatchField = 'timecode' | 'target' | 'speed' | 'terms'
+
+export interface DeliveryBatchItem {
+  cueId: string
+  start: number
+  end: number
+  target: string
+  speed: number
+  termIds: string[]
+  termLabels: string[]
+}
+
+export interface BatchDiffEntry {
+  cueId: string
+  kind: 'added' | 'changed' | 'removed'
+  before?: DeliveryBatchItem
+  after?: DeliveryBatchItem
+  fields: BatchField[]
+}
+
+export interface DeliveryBatch {
+  id: string
+  actorId: string
+  sequence: number
+  createdAt: number
+  items: DeliveryBatchItem[]
+  totalDuration: number
+  diff: { baseBatchId: string | null; entries: BatchDiffEntry[] }
+}
+
+export interface BatchImpact {
+  cueId: string
+  kind: 'changed' | 'missing'
+  fields: BatchField[]
+}
+
 export interface EditorDocument {
   id: string
   title: string
@@ -43,6 +79,7 @@ export interface EditorDocument {
   actors: Actor[]
   terms: Term[]
   snapshots: Snapshot[]
+  batches: DeliveryBatch[]
   updatedAt: number
   revision: number
   lastWriter: string

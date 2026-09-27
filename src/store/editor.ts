@@ -1,7 +1,8 @@
 import { defineStore } from 'pinia'
-import type { Cue, EditorDocument, Locale, Snapshot } from '../types'
+import type { Cue, DeliveryBatch, EditorDocument, Locale, Snapshot } from '../types'
 import { loadDocument, saveDocument } from '../utils/db'
 import { makeId } from '../utils/id'
+import { computeBatchImpact, diffBatchItems, freezeBatchItem, freezeBatchItems, changedBatchFields } from '../utils/delivery'
 import { parseScript, parseSrt, toSrt } from '../utils/subtitle'
 import { translate, type MessageKey } from '../i18n'
 
@@ -40,6 +41,7 @@ const createDefaultDocument = (): EditorDocument => ({
     { id: 'cue-demo-06', start: 25.4, end: 31.2, source: '所以我们决定把安装说明拆开，并为每个平台补上验证步骤。', target: '因此，我们拆分安装说明，并为每个平台补上验证步骤。', actorId: 'actor-chen', speed: 1.05, termIds: [], status: 'draft', locked: false },
   ],
   snapshots: [],
+  batches: [],
 })
 
 type SaveState = 'saved' | 'dirty' | 'saving' | 'conflict'
@@ -74,6 +76,28 @@ export const useEditorStore = defineStore('subtitle-editor', {
     totalDuration(state): number {
       return Math.max(10, ...state.document.cues.map((cue) => cue.end)) * 1.04
     },
+    batchImpact(state) {
+      return (batch: DeliveryBatch) => computeBatchImpact(batch, state.document.cues, state.document.terms)
+    },
+    affectedBatches(state): string[] {
+      return state.document.batches
+        .filter((batch) => computeBatchImpact(batch, state.document.cues, state.document.terms).length > 0)
+        .map((batch) => batch.id)
+    },
+    cueDelivery(state) {
+      return (cueId: string): { sequence: number; diverged: boolean } | undefined => {
+        for (let index = state.document.batches.length - 1; index >= 0; index -= 1) {
+          const batch = state.document.batches[index]
+          const item = batch.items.find((entry) => entry.cueId === cueId)
+          if (!item) continue
+          const cue = state.document.cues.find((entry) => entry.id === cueId)
+          if (!cue) return { sequence: batch.sequence, diverged: true }
+          const diverged = changedBatchFields(item, freezeBatchItem(cue, state.document.terms)).length > 0
+          return { sequence: batch.sequence, diverged }
+        }
+        return undefined
+      }
+    },
   },
   actions: {
     async initialize() {
@@ -81,6 +105,7 @@ export const useEditorStore = defineStore('subtitle-editor', {
       this.online = navigator.onLine
       const stored = await loadDocument(DOCUMENT_ID)
       if (stored) {
+        stored.batches ??= []
         this.document = stored
         this.lastSeenRevision = stored.revision
       } else {
@@ -288,6 +313,25 @@ export const useEditorStore = defineStore('subtitle-editor', {
       const snapshot: Snapshot = { id: makeId('snapshot'), name: name.trim() || `v${this.document.snapshots.length + 1}`, createdAt: Date.now(), cues: cloneCues(this.document.cues) }
       this.document.snapshots.unshift(snapshot)
       this.markChanged('snapshot', true)
+    },
+    createBatch(actorId: string) {
+      const reviewed = this.document.cues.filter((cue) => cue.actorId === actorId && cue.status === 'reviewed')
+      if (!reviewed.length) return undefined
+      const items = freezeBatchItems(reviewed, this.document.terms)
+      const actorBatches = this.document.batches.filter((batch) => batch.actorId === actorId)
+      const previous = actorBatches[actorBatches.length - 1]
+      const batch: DeliveryBatch = {
+        id: makeId('batch'),
+        actorId,
+        sequence: (previous?.sequence ?? 0) + 1,
+        createdAt: Date.now(),
+        items,
+        totalDuration: Number(items.reduce((sum, item) => sum + Math.max(0, item.end - item.start), 0).toFixed(3)),
+        diff: { baseBatchId: previous?.id ?? null, entries: diffBatchItems(previous?.items ?? [], items) },
+      }
+      this.document.batches.push(batch)
+      this.markChanged('delivery-batch', true)
+      return batch
     },
     restoreSnapshot(id: string) {
       const snapshot = this.document.snapshots.find((item) => item.id === id)

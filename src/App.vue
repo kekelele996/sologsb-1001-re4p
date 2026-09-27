@@ -3,11 +3,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Clock, Delete, DocumentCopy, Download, EditPen, Files, Lock, MagicStick, Monitor,
+  Clock, Collection, Delete, DocumentCopy, Download, EditPen, Files, Lock, MagicStick, Monitor,
   RefreshLeft, RefreshRight, Search, Unlock, UploadFilled,
 } from '@element-plus/icons-vue'
 import { useEditorStore } from './store/editor'
-import type { Cue, CueConflict } from './types'
+import type { BatchField, Cue, CueConflict, DeliveryBatch, DeliveryBatchItem } from './types'
 import { formatTime } from './utils/subtitle'
 
 const store = useEditorStore()
@@ -16,6 +16,9 @@ const fileInput = ref<HTMLInputElement>()
 const snapshotDialog = ref(false)
 const snapshotName = ref('')
 const search = ref('')
+const batchDialog = ref(false)
+const batchActorId = ref('')
+const expandedBatches = ref<string[]>([])
 
 const filteredCues = computed(() => {
   const query = search.value.trim().toLowerCase()
@@ -32,6 +35,47 @@ const actorColor = (id: string) => project.value.actors.find((actor) => actor.id
 const actorName = (id: string) => project.value.actors.find((actor) => actor.id === id)?.name ?? '—'
 const statusLabel = (status: Cue['status']) => store.t(status)
 const statusType = (status: Cue['status']) => status === 'reviewed' ? 'success' : status === 'issue' ? 'danger' : 'info'
+
+const FIELD_LABEL_KEYS = { timecode: 'fieldTimecode', target: 'fieldTarget', speed: 'fieldSpeed', terms: 'fieldTerms' } as const
+const affectedBatchCount = computed(() => store.affectedBatches.length)
+const eligibleCues = computed(() => project.value.cues.filter((cue) => cue.actorId === batchActorId.value && cue.status === 'reviewed'))
+const eligibleDuration = computed(() => eligibleCues.value.reduce((sum, cue) => sum + Math.max(0, cue.end - cue.start), 0))
+const actorBatches = computed(() => project.value.batches.filter((batch) => batch.actorId === batchActorId.value).slice().reverse())
+const formatDuration = (seconds: number) => store.t('durationSeconds', { value: seconds.toFixed(1) })
+const fieldLabel = (field: BatchField) => store.t(FIELD_LABEL_KEYS[field])
+const deliveryOf = (cueId: string) => store.cueDelivery(cueId)
+const impactOf = (batch: DeliveryBatch) => store.batchImpact(batch)
+const itemOf = (batch: DeliveryBatch, cueId: string) => batch.items.find((item) => item.cueId === cueId)
+const batchById = (id: string | null) => project.value.batches.find((batch) => batch.id === id)
+const diffCounts = (batch: DeliveryBatch) => {
+  const counts = { added: 0, changed: 0, removed: 0 }
+  for (const entry of batch.diff.entries) counts[entry.kind] += 1
+  return counts
+}
+const fieldValue = (item: DeliveryBatchItem | undefined, field: BatchField) => {
+  if (!item) return '—'
+  if (field === 'timecode') return `${formatTime(item.start)} → ${formatTime(item.end)}`
+  if (field === 'target') return item.target || '—'
+  if (field === 'speed') return `×${item.speed.toFixed(2)}`
+  return item.termLabels.length ? item.termLabels.join(', ') : '—'
+}
+function expandLatestBatch() {
+  expandedBatches.value = actorBatches.value[0] ? [actorBatches.value[0].id] : []
+}
+function openBatches() {
+  batchActorId.value = actorFilter.value !== 'all' ? actorFilter.value : project.value.actors[0]?.id ?? ''
+  expandLatestBatch()
+  batchDialog.value = true
+}
+function createBatch() {
+  const batch = store.createBatch(batchActorId.value)
+  if (!batch) {
+    ElMessage.warning(store.t('batchNone'))
+    return
+  }
+  expandedBatches.value = [batch.id]
+  ElMessage.success(store.t('batchCreated', { n: batch.sequence, count: batch.items.length }))
+}
 
 function updateSelected(patch: Partial<Cue>, label = 'update-cue') {
   if (selectedCue.value) store.updateCue(selectedCue.value.id, patch, label)
@@ -146,6 +190,9 @@ const handleOffline = () => setOnline(false)
         <input ref="fileInput" class="file-input" type="file" accept=".srt,.txt,text/plain" @change="importFile" />
         <el-button :icon="UploadFilled" @click="fileInput?.click()">{{ store.t('import') }}</el-button>
         <el-button :icon="Download" @click="store.exportSrt">{{ store.t('export') }}</el-button>
+        <el-badge :value="affectedBatchCount" :show-zero="false" type="warning" class="batch-badge">
+          <el-button :icon="Collection" @click="openBatches">{{ store.t('batches') }}</el-button>
+        </el-badge>
         <el-button type="primary" :icon="DocumentCopy" @click="snapshotDialog = true">{{ store.t('snapshot') }}</el-button>
       </div>
     </header>
@@ -244,6 +291,9 @@ const handleOffline = () => setOnline(false)
                 <span class="actor-pill" :style="{ '--actor': actorColor(cue.actorId) }">{{ actorName(cue.actorId) }}</span>
                 <code>{{ formatTime(cue.start) }} → {{ formatTime(cue.end) }}</code>
                 <el-tag size="small" :type="statusType(cue.status)">{{ statusLabel(cue.status) }}</el-tag>
+                <el-tag v-if="deliveryOf(cue.id)" size="small" effect="plain" :type="deliveryOf(cue.id)!.diverged ? 'warning' : 'success'">
+                  {{ deliveryOf(cue.id)!.diverged ? store.t('deliveredDiverged', { n: deliveryOf(cue.id)!.sequence }) : store.t('deliveredTag', { n: deliveryOf(cue.id)!.sequence }) }}
+                </el-tag>
                 <el-icon v-if="cue.locked"><Lock /></el-icon>
                 <span class="cue-warning-count" v-if="cueWarnings(cue).length">{{ cueWarnings(cue).length }} context</span>
               </div>
@@ -316,6 +366,79 @@ const handleOffline = () => setOnline(false)
       <span><kbd>L</kbd> {{ store.t('shortcutLock') }}</span>
       <span><kbd>Ctrl/⌘ Z</kbd> {{ store.t('shortcutUndo') }}</span>
     </footer>
+
+    <el-dialog v-model="batchDialog" :title="store.t('batches')" width="780px">
+      <div class="batch-toolbar">
+        <el-select v-model="batchActorId" class="batch-actor-select" @change="expandLatestBatch">
+          <el-option v-for="actor in project.actors" :key="actor.id" :label="actor.name" :value="actor.id" />
+        </el-select>
+        <el-button type="primary" :icon="Collection" :disabled="!eligibleCues.length" @click="createBatch">{{ store.t('createBatch') }}</el-button>
+        <span class="batch-eligible" :class="{ muted: !eligibleCues.length }">
+          {{ eligibleCues.length ? store.t('batchEligible', { count: eligibleCues.length, duration: formatDuration(eligibleDuration) }) : store.t('batchNone') }}
+        </span>
+      </div>
+      <p class="batch-hint">{{ store.t('batchHint') }}</p>
+      <div class="batch-list">
+        <el-collapse v-model="expandedBatches">
+          <el-collapse-item v-for="batch in actorBatches" :key="batch.id" :name="batch.id">
+            <template #title>
+              <div class="batch-title">
+                <b>{{ store.t('batchNumber', { n: batch.sequence }) }}</b>
+                <small>{{ new Date(batch.createdAt).toLocaleString() }}</small>
+                <span>{{ store.t('cueCount', { count: batch.items.length }) }} · {{ store.t('batchDuration', { duration: formatDuration(batch.totalDuration) }) }}</span>
+                <el-tag v-if="impactOf(batch).length" size="small" type="warning">{{ store.t('batchAffected') }}</el-tag>
+              </div>
+            </template>
+            <div class="batch-diff-head">
+              <el-tag v-if="!batch.diff.baseBatchId" size="small" type="info" effect="plain">{{ store.t('batchFirst') }}</el-tag>
+              <template v-else>
+                <small>{{ store.t('batchCompare', { n: batchById(batch.diff.baseBatchId)?.sequence ?? '?' }) }}</small>
+                <el-tag size="small" type="success" effect="plain">+{{ diffCounts(batch).added }} {{ store.t('diffAdded') }}</el-tag>
+                <el-tag size="small" type="warning" effect="plain">~{{ diffCounts(batch).changed }} {{ store.t('diffChanged') }}</el-tag>
+                <el-tag size="small" type="danger" effect="plain">-{{ diffCounts(batch).removed }} {{ store.t('diffRemoved') }}</el-tag>
+              </template>
+            </div>
+            <p v-if="batch.diff.baseBatchId && !batch.diff.entries.length" class="batch-note">{{ store.t('batchNoDiff') }}</p>
+            <ul class="diff-entries">
+              <li v-for="entry in batch.diff.entries" :key="entry.cueId" class="diff-entry" :class="entry.kind">
+                <div class="diff-entry-head">
+                  <el-tag size="small" effect="dark" class="diff-kind" :type="entry.kind === 'added' ? 'success' : entry.kind === 'changed' ? 'warning' : 'danger'">
+                    {{ store.t(entry.kind === 'added' ? 'diffAdded' : entry.kind === 'changed' ? 'diffChanged' : 'diffRemoved') }}
+                  </el-tag>
+                  <code>{{ formatTime((entry.after ?? entry.before)!.start) }} → {{ formatTime((entry.after ?? entry.before)!.end) }}</code>
+                </div>
+                <p v-if="entry.kind !== 'changed'" class="diff-text">{{ (entry.after ?? entry.before)?.target || '—' }}</p>
+                <div v-else class="diff-fields">
+                  <div v-for="field in entry.fields" :key="field" class="diff-field">
+                    <label>{{ fieldLabel(field) }}</label>
+                    <span class="before">{{ fieldValue(entry.before, field) }}</span>
+                    <i>→</i>
+                    <span class="after">{{ fieldValue(entry.after, field) }}</span>
+                  </div>
+                </div>
+              </li>
+            </ul>
+            <div v-if="impactOf(batch).length" class="batch-impact">
+              <h4>{{ store.t('batchAffected') }}</h4>
+              <p class="batch-note">{{ store.t('batchAffectedHint') }}</p>
+              <ul class="diff-entries">
+                <li v-for="impact in impactOf(batch)" :key="impact.cueId" class="diff-entry" :class="impact.kind === 'missing' ? 'removed' : 'changed'">
+                  <div class="diff-entry-head">
+                    <el-tag size="small" effect="dark" class="diff-kind" :type="impact.kind === 'missing' ? 'danger' : 'warning'">
+                      {{ impact.kind === 'missing' ? store.t('batchMissing') : store.t('diffChanged') }}
+                    </el-tag>
+                    <code>{{ formatTime(itemOf(batch, impact.cueId)!.start) }} → {{ formatTime(itemOf(batch, impact.cueId)!.end) }}</code>
+                    <span v-if="impact.fields.length" class="impact-fields">{{ impact.fields.map(fieldLabel).join(' · ') }}</span>
+                  </div>
+                  <p class="diff-text">{{ itemOf(batch, impact.cueId)?.target || '—' }}</p>
+                </li>
+              </ul>
+            </div>
+          </el-collapse-item>
+        </el-collapse>
+        <p v-if="!actorBatches.length" class="empty-state">{{ store.t('noBatches') }}</p>
+      </div>
+    </el-dialog>
 
     <el-dialog v-model="snapshotDialog" :title="store.t('snapshot')" width="460px">
       <el-input v-model="snapshotName" :placeholder="store.t('newSnapshotName')" @keyup.enter="createSnapshot" />

@@ -114,6 +114,37 @@ kbd { padding: 2px 5px; border: 1px solid #5a6981; border-radius: 4px; color: wh
 .snapshot-item { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid #edf0f4; }
 .snapshot-item div { display: flex; flex-direction: column; gap: 3px; }
 .snapshot-item small, .snapshot-item span { color: #7b8799; font-size: 11px; }
+.batch-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.batch-actor-select { width: 220px; }
+.batch-eligible { color: #4c5a70; font-size: 12px; }
+.batch-eligible.muted { color: #9aa6b8; }
+.batch-hint { margin: 10px 0 4px; color: #7c8799; font-size: 12px; line-height: 1.6; }
+.batch-list { max-height: 480px; overflow: auto; margin-top: 8px; padding-right: 4px; }
+.batch-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.batch-title b { color: #233452; }
+.batch-title small { color: #8793a7; font-weight: 400; }
+.batch-title span { color: #5c6b82; font-size: 12px; font-weight: 400; }
+.batch-diff-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.batch-diff-head small { color: #8793a7; }
+.batch-note { margin: 4px 0 8px; color: #8a94a6; font-size: 12px; line-height: 1.55; }
+.diff-entries { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.diff-entry { padding: 8px 10px; border: 1px solid #e6ebf2; border-left: 3px solid #b7c3d6; border-radius: 8px; background: #fbfcfe; }
+.diff-entry.added { border-left-color: #4fae7c; }
+.diff-entry.changed { border-left-color: #e6a23c; }
+.diff-entry.removed { border-left-color: #e25f59; }
+.diff-entry-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.diff-entry-head code { color: #66748a; font-size: 11px; }
+.diff-kind { font-weight: 700; }
+.diff-text { margin: 6px 0 0; color: #46546b; font-size: 12px; line-height: 1.55; }
+.diff-fields { display: grid; gap: 5px; margin-top: 6px; }
+.diff-field { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto minmax(0, 1fr); align-items: baseline; gap: 8px; font-size: 12px; }
+.diff-field label { color: #8a94a6; font-size: 11px; }
+.diff-field .before { color: #9a5b5b; text-decoration: line-through; text-decoration-color: rgba(154, 91, 91, .45); }
+.diff-field .after { color: #1f5ddd; }
+.diff-field i { color: #a4adbc; font-style: normal; }
+.batch-impact { margin-top: 12px; padding: 10px 12px; border: 1px dashed #e3b26a; border-radius: 8px; background: #fffaf1; }
+.batch-impact h4 { margin: 0 0 4px; color: #8a5a12; font-size: 12px; }
+.impact-fields { color: #ad6610; font-size: 11px; }
 @media (max-width: 1380px) {
   .workspace { grid-template-columns: 224px minmax(580px, 1fr) 330px; }
   .shortcut-bar { left: 224px; right: 330px; }
